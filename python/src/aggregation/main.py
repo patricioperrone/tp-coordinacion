@@ -1,6 +1,7 @@
 import os
 import logging
 import bisect
+import signal
 
 from common import middleware, message_protocol, fruit_item
 
@@ -23,38 +24,76 @@ class AggregationFilter:
         self.output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, OUTPUT_QUEUE
         )
-        self.fruit_top = []
+        # Frutas y cantidadess para cada cliente
+        self.client_fruits = {}
 
-    def _process_data(self, fruit, amount):
+        # Contador de EoF para cada cliente
+        self.eof_counters = {}
+
+        # Registrar la SIGTERM
+        signal.signal(signal.SIGTERM, self._handle_sigterm)
+
+    def _handle_sigterm(self, signum, frame):
+        logging.info("SIGTERM received. Shutting down")
+        self.input_exchange.stop_consuming()
+        try:
+            self.input_exchange.close()
+            self.output_queue.close()
+        except Exception as e:
+            logging.error(f"Error closing middleware: {e}")
+
+    def _process_data(self, cli_id, fruit, amount):
         logging.info("Processing data message")
-        for i in range(len(self.fruit_top)):
-            if self.fruit_top[i].fruit == fruit:
-                self.fruit_top[i] = self.fruit_top[i] + fruit_item.FruitItem(
-                    fruit, amount
-                )
-                return
-        bisect.insort(self.fruit_top, fruit_item.FruitItem(fruit, amount))
+        
+        # Si el cliente no existe, lo agrego
+        if cli_id not in self.client_fruits:
+            self.client_fruits[cli_id] = {}
 
-    def _process_eof(self):
-        logging.info("Received EOF")
-        fruit_chunk = list(self.fruit_top[-TOP_SIZE:])
-        fruit_chunk.reverse()
-        fruit_top = list(
-            map(
-                lambda fruit_item: (fruit_item.fruit, fruit_item.amount),
-                fruit_chunk,
+        client_fruit_tops = self.client_fruits[cli_id]
+
+        client_fruit_tops[fruit] = client_fruit_tops.get(
+            fruit, fruit_item.FruitItem(fruit, 0)
+        ) + fruit_item.FruitItem(fruit, int(amount))
+
+    def _process_eof(self, cli_id):
+        logging.info(f"Received EOF from: {cli_id}")
+
+        # inicializo un contador de EoF para el cliente
+        if cli_id not in self.eof_counters:
+            self.eof_counters[cli_id] = 0
+
+        self.eof_counters[cli_id] += 1
+
+        # Si recibi un EoF de cada sumador
+        if self.eof_counters[cli_id] == SUM_AMOUNT:
+            logging.info(f"All EOFs received for {cli_id}. Calculating Top.")
+            # Top de frutas desordenado de ese cliente
+            unordered_fruit_top = self.client_fruits.pop(cli_id, {})
+
+            # Ordenar el top
+            fruit_top = sorted(unordered_fruit_top.values(), reverse=True)  
+
+            # Recortar el top a la cantidad pedida por parametro
+            fruit_top = fruit_top[:TOP_SIZE]
+            fruit_top_tuples = [
+                (item.fruit, item.amount) for item in fruit_top
+            ]
+            
+            # Enviar al joiner
+            self.output_queue.send(
+                message_protocol.internal.serialize([cli_id, fruit_top_tuples])
             )
-        )
-        self.output_queue.send(message_protocol.internal.serialize(fruit_top))
-        del self.fruit_top
+
+            del self.eof_counters[cli_id]
 
     def process_messsage(self, message, ack, nack):
         logging.info("Process message")
         fields = message_protocol.internal.deserialize(message)
-        if len(fields) == 2:
+        cli_id = fields[0]
+        if len(fields) == 3:
             self._process_data(*fields)
         else:
-            self._process_eof()
+            self._process_eof(cli_id)
         ack()
 
     def start(self):
