@@ -100,3 +100,13 @@ Como el bucle de eventos procesa los mensajes uno por uno, no hay hilos compitie
 
 **D) Apagado**
 Repeti el patron de apagado del resto del sistema. Capturo la señal, y dentro del handler, llamo a `stop_consuming()` para destabar el hilo y cierro las conexione.
+
+### 5. Escalabilidad del Sistema
+
+**Escalabilidad respecto a la cantidad de clientes:**
+*   **Alta concurrencia:** Como cada nodo maneja diccionarios indexados por cliente, los datos se mantienen estrictamente independientes. Procesar cientos de clientes en simultáneo no mezcla las métricas. El diccionario crece en cantidad de claves, pero como cada vez que desplazamos los datos de un cliente al siguiente nodo (por ejemplo, de un sumador a un agregador) los extraemos y liberamos de la memoria, este escenario de consumo dememoria se mantiene controlado.
+*   **Baja concurrencia:** Si tenemos muy pocos clientes (uno, por ejemplo), el sistema no desperdicia recursos. Pagamos el *trade-off* mínimo de tener que procesar la función de hash y buscar en diccionarios anidados, lo cual tiene un costo despreciable.
+
+**Escalabilidad respecto al volumen de datos:**
+*   **Grandes volúmenes:** Si los clientes envían muchísimos datos, pero la cantidad de frutas distintas es acotada, los diccionarios se mantiene de tamaño constante. Esto se debe a que no guardo cada dato recibido individualmente, sino que incremento el valor de un contador interno.
+*   **Pequeños volúmenes:** Si hay muy poco volumen de datos fluyendo por la red, el mayor *trade-off* es el temporizador de inactividad de 1.5 segundos en los sumadores. Esto ralentiza el procesamiento de una rafaga corta, pero es un costo necesario para asegurar que no queden paquetes sin procesar.
